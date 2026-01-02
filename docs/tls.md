@@ -35,6 +35,11 @@ listeners:
   https:
     address: https://0.0.0.0
 
+services:
+  api:
+    https_redirect: true
+    http_proxy: []
+
 tls:
   acme:
     domains: ["pingoo.io"]

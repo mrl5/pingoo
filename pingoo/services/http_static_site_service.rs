@@ -22,7 +22,8 @@ use crate::{
     services::{
         HttpService,
         http_utils::{
-            CACHE_CONTROL_DYNAMIC, new_internal_error_response_500, new_method_not_allowed_error, new_not_found_error,
+            CACHE_CONTROL_DYNAMIC, new_https_redirect_response, new_internal_error_response_500,
+            new_method_not_allowed_error, new_not_found_error,
         },
     },
 };
@@ -37,6 +38,7 @@ pub struct StaticSiteService {
     config: StaticSiteServiceConfig,
     /// in-memory cache for popular files
     cache: Cache<PathBuf, Arc<CachedFile>>,
+    https_redirect: bool,
 }
 
 #[derive(Clone)]
@@ -61,6 +63,7 @@ impl StaticSiteService {
             route: config.route,
             name: Arc::new(config.name),
             cache,
+            https_redirect: config.https_redirect.unwrap_or(false),
         };
     }
 }
@@ -81,6 +84,9 @@ impl HttpService for StaticSiteService {
     }
 
     async fn handle_http_request(&self, req: Request<hyper::body::Incoming>) -> Response<BoxBody<Bytes, hyper::Error>> {
+        if self.https_redirect {
+            return new_https_redirect_response(&req);
+        }
         let url_path = req.uri().path().trim_start_matches('/').trim_end_matches('/').trim();
 
         if req.method() != Method::GET && req.method() != Method::HEAD {

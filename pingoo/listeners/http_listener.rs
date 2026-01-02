@@ -2,7 +2,6 @@ use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use ::rules::Action;
 use cookie::Cookie;
-use http::Request;
 use hyper::service::service_fn;
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -21,8 +20,8 @@ use crate::{
     services::{
         HttpService,
         http_utils::{
-            HOSTNAME_MAX_LENGTH, RequestContext, RequestExtensionContext, USER_AGENT_MAX_LENGTH, get_path,
-            new_blocked_response, new_not_found_error,
+            RequestContext, RequestExtensionContext, USER_AGENT_MAX_LENGTH, get_host, get_path, new_blocked_response,
+            new_not_found_error,
         },
     },
 };
@@ -279,18 +278,4 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
     {
         error!(listener = listener_name.as_ref(), "error serving HTTP connection: {err:?}");
     };
-}
-
-pub fn get_host(req: &Request<hyper::body::Incoming>) -> heapless::String<HOSTNAME_MAX_LENGTH> {
-    // uri.host is present for HTTP/2 requests
-    if let Some(host) = req.uri().host() {
-        return heapless::String::from_str(host.trim()).unwrap_or_default();
-    }
-
-    // otherwise, in HTTP/1.x it should be present in the Host header
-    if let Some(host) = req.headers().get(http::header::HOST) {
-        return heapless::String::from_str(host.to_str().unwrap_or_default().trim()).unwrap_or_default();
-    }
-
-    return heapless::String::new();
 }

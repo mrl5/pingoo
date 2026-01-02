@@ -73,6 +73,7 @@ pub struct ServiceConfig {
     pub http_proxy: Option<Vec<UpstreamConfig>>,
     pub r#static: Option<StaticSiteServiceConfig>,
     pub tcp_proxy: Option<Vec<UpstreamConfig>>,
+    pub https_redirect: Option<bool>,
 }
 
 // #[derive(Clone, Debug)]

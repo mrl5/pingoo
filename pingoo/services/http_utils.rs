@@ -1,7 +1,7 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
-use http::{HeaderValue, Request, Response, StatusCode, header};
+use http::{HeaderValue, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use serde::Serialize;
@@ -109,6 +109,50 @@ pub fn new_method_not_allowed_error() -> Response<BoxBody<Bytes, hyper::Error>> 
         .header(header::CACHE_CONTROL, &CACHE_CONTROL_NO_CACHE)
         .body(res_body)
         .expect("error building new_method_not_allowed_error");
+}
+
+pub fn new_https_redirect_response(req: &Request<hyper::body::Incoming>) -> Response<BoxBody<Bytes, hyper::Error>> {
+    let authority = get_host(req);
+    let uri_builder = Uri::builder().scheme("https").authority(authority.as_str());
+
+    let redirect_uri = match req.uri().path_and_query() {
+        Some(pg) => uri_builder
+            .path_and_query(pg.as_str())
+            .build()
+            .expect("https redirect URI should be valid"),
+        None => uri_builder.build().expect("https redirect URI should be valid"),
+    };
+
+    let res_body = Full::new(Bytes::from_static(b""))
+        .map_err(|never| match never {})
+        .boxed();
+    return Response::builder()
+        .status(StatusCode::PERMANENT_REDIRECT)
+        .header(header::LOCATION, redirect_uri.to_string())
+        .body(res_body)
+        .expect("error building new_https_redirect_response");
+}
+
+pub fn get_host(req: &Request<hyper::body::Incoming>) -> heapless::String<HOSTNAME_MAX_LENGTH> {
+    // uri.host is present for HTTP/2 requests
+    // contrary to Host header it doesn't contain port
+    if let Some(just_host) = req.uri().host() {
+        // in order to unify the behavior we need to enrich it
+        if let Some(port) = req.uri().port() {
+            let mut host = heapless::String::from_str(port.as_str().trim()).unwrap_or_default();
+            host.insert_str(0, ":").unwrap_or_default();
+            host.insert_str(0, just_host.trim()).unwrap_or_default();
+            return host;
+        }
+        return heapless::String::from_str(just_host.trim()).unwrap_or_default();
+    }
+
+    // otherwise, in HTTP/1.x it should be present in the Host header
+    if let Some(host) = req.headers().get(http::header::HOST) {
+        return heapless::String::from_str(host.to_str().unwrap_or_default().trim()).unwrap_or_default();
+    }
+
+    return heapless::String::new();
 }
 
 pub fn get_path(req: &Request<Incoming>) -> &str {

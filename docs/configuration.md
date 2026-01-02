@@ -52,6 +52,8 @@ services:
     # match any request / connection if left empty
     route: http_request.starts_with("/api")
     http_proxy: [] # list of upstreams. Can be left empty if using Docker service discovery
+    # (optional) force https when service accessed via http
+    https_redirect: true
 
   webapp:
     # static site

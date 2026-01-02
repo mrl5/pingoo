@@ -62,6 +62,7 @@ pub struct ServiceConfigFile {
     pub tcp_proxy: Option<Vec<String>>,
     // #[serde(default)]
     // pub rules: Vec<String>,
+    pub https_redirect: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -264,12 +265,15 @@ pub fn parse_service(service_name: String, service: ServiceConfigFile) -> Result
         .unwrap_or(Ok(None))
         .map_err(|err: rules::Error| Error::Config(format!("error parsing route for service {service_name}: {err}")))?;
 
+    let https_redirect = service.https_redirect;
+
     return Ok(ServiceConfig {
         name: service_name,
         route,
         http_proxy,
         r#static: r#static,
         tcp_proxy,
+        https_redirect,
     });
 }
 

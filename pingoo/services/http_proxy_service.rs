@@ -16,7 +16,7 @@ use crate::{
     service_discovery::service_registry::ServiceRegistry,
     services::{
         HttpService,
-        http_utils::{RequestExtensionContext, new_bad_gateway_error},
+        http_utils::{RequestExtensionContext, new_bad_gateway_error, new_https_redirect_response},
     },
 };
 
@@ -47,6 +47,7 @@ pub struct HttpProxyService {
     http_client: Client<hyper_rustls::HttpsConnector<HttpConnector>, hyper::body::Incoming>,
     service_registry: Arc<ServiceRegistry>,
     route: Option<rules::CompiledExpression>,
+    https_redirect: bool,
 }
 
 impl HttpProxyService {
@@ -75,6 +76,7 @@ impl HttpProxyService {
             http_client,
             service_registry,
             route: config.route,
+            https_redirect: config.https_redirect.unwrap_or(false),
         };
     }
 }
@@ -98,6 +100,10 @@ impl HttpService for HttpProxyService {
         &self,
         mut req: Request<hyper::body::Incoming>,
     ) -> Response<BoxBody<Bytes, hyper::Error>> {
+        if self.https_redirect {
+            return new_https_redirect_response(&req);
+        }
+
         let upstreams = self.service_registry.get_upstreams(&self.name).await;
         if upstreams.is_empty() {
             debug!("[{}]: no upstream available", self.name);
