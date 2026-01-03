@@ -68,6 +68,13 @@ rules:
       !http_request.user_agent.starts_with("Mozilla/") && !http_request.user_agent.contains("curl/")
     actions:
       - action: captcha
+  rate_limit_api_routes:
+    expression: http_request.path.starts_with("/api/")
+    actions:
+      - action: block
+    limit:
+      max: 10
+      window: 60
 
 # (optional) Lists can be used in rule expressions to match against a large number of values
 lists:

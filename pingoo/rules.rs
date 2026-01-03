@@ -11,6 +11,7 @@ pub struct Rule {
     pub name: String,
     pub expression: Option<rules::CompiledExpression>,
     pub actions: Vec<rules::Action>,
+    pub limit: Option<rules::RateLimit>,
 }
 
 #[derive(Debug, Serialize)]

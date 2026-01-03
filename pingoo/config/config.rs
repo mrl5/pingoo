@@ -263,6 +263,7 @@ pub async fn load_and_validate() -> Result<Config, Error> {
                     .map(|expression| rules::compile_expression(&expression))
                     .map_or(Ok(None), |r| r.map(Some))?,
                 actions: rule_config.actions,
+                limit: rule_config.limit,
             })
         })
         .collect::<Result<_, rules::Error>>()

@@ -118,3 +118,16 @@ Valid lists types:
 - `String`
 - `Ip`
 
+## Rate limiting
+
+**pingoo.yml**
+```yml
+rules:
+  rate_limit_api_routes:
+    expression: http_request.path.starts_with("/api/")
+    actions:
+      - action: block
+    limit:
+      max: 10
+      window: 60
+```
