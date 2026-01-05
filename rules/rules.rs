@@ -28,7 +28,7 @@ pub type Context<'a> = bel::Context<'a>;
 #[serde(tag = "limit", rename_all = "snake_case")]
 pub struct RateLimit {
     pub max: u16,
-    pub window: Duration,
+    pub window: u16,
 }
 
 // pub struct CompiledRule {
@@ -41,6 +41,7 @@ pub struct RateLimit {
 pub enum Action {
     Block {},
     Captcha {},
+    Limit {},
 }
 
 #[derive(Debug, thiserror::Error)]

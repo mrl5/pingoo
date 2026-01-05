@@ -126,7 +126,7 @@ rules:
   rate_limit_api_routes:
     expression: http_request.path.starts_with("/api/")
     actions:
-      - action: block
+      - action: limit
     limit:
       max: 10
       window: 60

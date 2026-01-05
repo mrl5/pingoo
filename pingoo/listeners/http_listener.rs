@@ -17,12 +17,14 @@ use crate::{
     config::ListenerConfig,
     geoip::{self, GeoipDB, GeoipRecord},
     listeners::{GRACEFUL_SHUTDOWN_TIMEOUT, Listener, accept_tcp_connection, bind_tcp_socket},
+    rate_limiter::get_probe,
     rules,
     services::{
         HttpService,
         http_utils::{
             HOSTNAME_MAX_LENGTH, RequestContext, RequestExtensionContext, USER_AGENT_MAX_LENGTH, get_path,
-            new_blocked_response, new_not_found_error,
+            new_blocked_response, new_internal_error_response_500, new_not_found_error,
+            new_too_many_requests_response_429,
         },
     },
 };
@@ -256,6 +258,29 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
                             Action::Captcha {} => {
                                 if !captcha_verified {
                                     return Ok(captcha_manager.serve_captcha());
+                                }
+                            }
+                            Action::Limit {} => {
+                                // todo: if "action: limit" then this must be defined - not Option
+                                if let Some(tx) = rule.limiter_tx.clone() {
+                                    let (probe, rx) = get_probe(client_data.ip);
+                                    if let Err(err) = tx.send(probe).await {
+                                        error!("couldn't send request probe to rate limiter: {err}");
+                                        return Ok(new_internal_error_response_500());
+                                    }
+
+                                    let result = rx.await;
+                                    let can_resume;
+                                    if let Err(err) = result {
+                                        error!("couldn't receive rate limiter result: {err}");
+                                        return Ok(new_internal_error_response_500());
+                                    } else {
+                                        can_resume = result.expect("rate limiter result should be received");
+                                    }
+
+                                    if !can_resume {
+                                        return Ok(new_too_many_requests_response_429());
+                                    }
                                 }
                             }
                         }

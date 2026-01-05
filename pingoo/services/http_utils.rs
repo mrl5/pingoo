@@ -111,6 +111,18 @@ pub fn new_method_not_allowed_error() -> Response<BoxBody<Bytes, hyper::Error>> 
         .expect("error building new_method_not_allowed_error");
 }
 
+pub fn new_too_many_requests_response_429() -> Response<BoxBody<Bytes, hyper::Error>> {
+    const ERROR_MESSAGE: &[u8] = b"429 Too Many Requests";
+    let res_body = Full::new(Bytes::from_static(ERROR_MESSAGE))
+        .map_err(|never| match never {})
+        .boxed();
+    return Response::builder()
+        .status(StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CACHE_CONTROL, &CACHE_CONTROL_NO_CACHE)
+        .body(res_body)
+        .expect("error building new_method_not_allowed_error");
+}
+
 pub fn get_path(req: &Request<Incoming>) -> &str {
     req.uri().path().trim_end_matches('/')
 }

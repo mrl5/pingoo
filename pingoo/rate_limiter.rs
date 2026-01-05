@@ -1,21 +1,41 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 
+use rules::RateLimit;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
-pub struct RateLimiter {
+pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut limiter = RateLimiter::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+
+pub fn get_probe(ip: IpAddr) -> (Probe, oneshot::Receiver<bool>) {
+    let (tx, rx) = oneshot::channel();
+    (Probe { ip, resp: tx }, rx)
+}
+
+type Responder = oneshot::Sender<bool>;
+pub struct Probe {
+    ip: IpAddr,
+    resp: Responder,
+}
+
+struct RateLimiter {
     limit: u16,
     window: Duration,
-    state: HashMap<IpAddrBits, SlidingWindow>,
+    state: HashMap<IpAddr, SlidingWindow>,
 }
 
-#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
-pub enum IpAddrBits {
-    V4([u8; 4]),  // as in Ipv4Addr::octets()
-    V6([u8; 16]), // as in Ipv6Addr::octets()
-}
-
-pub struct SlidingWindow {
+struct SlidingWindow {
     limit: u16,
     window: Duration,
     previous_sampler: InMemorySampler,
@@ -46,14 +66,16 @@ impl RateLimiter {
         }
     }
 
-    pub fn can_resume(&mut self, ip: IpAddrBits) -> bool {
-        let mut new_ip_state = SlidingWindow::new(self.limit, self.window);
-        let mut result: bool = new_ip_state.can_resume();
-
+    pub fn can_resume(&mut self, ip: IpAddr) -> bool {
+        let mut result = false;
         self.state
             .entry(ip)
             .and_modify(|x| result = x.can_resume())
-            .or_insert(new_ip_state);
+            .or_insert_with(|| {
+                let mut new_ip_state = SlidingWindow::new(self.limit, self.window);
+                result = new_ip_state.can_resume();
+                new_ip_state
+            });
         result
     }
 
@@ -163,7 +185,7 @@ mod tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn test_sliding_window_alg() {
+    async fn test_rate_limiter_alg() {
         // Tests example form https://blog.cloudflare.com/counting-things-a-lot-of-different-things/
         //
         // "Let's say I set a limit of 50 requests per minute on an API endpoint.
@@ -174,7 +196,7 @@ mod tests {
         //      = 42 * 0.75 + 18
         //      = 49.5 requests
         let mut r = RateLimiter::new(50, Duration::new(60, 0));
-        let ip = IpAddrBits::V4(Ipv4Addr::new(1, 1, 1, 1).octets());
+        let ip = Ipv4Addr::new(1, 1, 1, 1).into();
         for _ in 0..42 {
             assert!(r.can_resume(ip), "should resume until limit is not reached")
         }
@@ -193,10 +215,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_gc() {
         let mut limiter = RateLimiter::new(10, Duration::new(60, 0));
-        let ips = [
-            IpAddrBits::V4(Ipv4Addr::new(1, 1, 1, 1).octets()),
-            IpAddrBits::V4(Ipv4Addr::new(2, 2, 2, 2).octets()),
-        ];
+        let ips = [Ipv4Addr::new(1, 1, 1, 1).into(), Ipv4Addr::new(2, 2, 2, 2).into()];
         assert!(limiter.can_resume(ips[0]));
         assert!(limiter.can_resume(ips[1]));
 
@@ -215,8 +234,8 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_sliding_window_boundary() {
-        let ip = IpAddrBits::V4(Ipv4Addr::new(1, 1, 1, 1).octets());
+    async fn test_rate_limiter_boundary() {
+        let ip = Ipv4Addr::new(1, 1, 1, 1).into();
         let mut r = RateLimiter::new(1, Duration::new(1, 0));
 
         assert!(r.can_resume(ip), "should allow once when limit is 1");
