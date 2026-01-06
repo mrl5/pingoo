@@ -14,6 +14,8 @@ pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLim
         while let Some(probe) = rx.recv().await {
             let result = limiter.can_resume(probe.ip);
             let _ = probe.resp.send(result);
+
+            limiter.garbage_collect();
         }
     })
 }
@@ -80,8 +82,24 @@ impl RateLimiter {
     }
 
     pub fn garbage_collect(&mut self) {
-        self.state
-            .retain(|_, v| v.get_last_sample_created_at().elapsed() < 2 * self.window);
+        // inspired by https://blog.nginx.org/blog/rate-limiting-nginx
+        //
+        // "Additionally, to prevent memory from being exhausted, every time NGINX creates a new
+        // entry it removes up to two entries that have not been used in the previous 60
+        // seconds."
+        const ITEMS: usize = 2;
+
+        let garbage: heapless::Vec<IpAddr, ITEMS> = self
+            .state
+            .iter()
+            .filter(|(_, v)| v.get_last_sample_created_at().elapsed() > 2 * self.window)
+            .take(ITEMS)
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        for ip in garbage {
+            let _ = self.state.remove(&ip);
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -215,21 +233,29 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_gc() {
         let mut limiter = RateLimiter::new(10, Duration::new(60, 0));
-        let ips = [Ipv4Addr::new(1, 1, 1, 1).into(), Ipv4Addr::new(2, 2, 2, 2).into()];
-        assert!(limiter.can_resume(ips[0]));
-        assert!(limiter.can_resume(ips[1]));
+        let ips = [
+            Ipv4Addr::new(1, 1, 1, 1).into(),
+            Ipv4Addr::new(2, 2, 2, 2).into(),
+            Ipv4Addr::new(3, 3, 3, 3).into(),
+            Ipv4Addr::new(4, 4, 4, 4).into(),
+            Ipv4Addr::new(5, 5, 5, 5).into(),
+        ];
+        for ip in ips {
+            assert!(limiter.can_resume(ip));
+        }
 
         sleep(Duration::from_secs(61)).await;
         assert!(limiter.can_resume(ips[0]));
         limiter.garbage_collect();
-        assert_eq!(2, limiter.len());
+        assert_eq!(ips.len(), limiter.len());
 
         sleep(Duration::from_secs(60)).await;
+        assert!(limiter.can_resume(ips[0]));
         limiter.garbage_collect();
         assert_eq!(
-            1,
+            ips.len() - 2,
             limiter.len(),
-            "should garbage collect entries that were not updated for 2 * window"
+            "should garbage collect entries that were not updated for 2 * window, but no more than 2"
         );
     }
 
