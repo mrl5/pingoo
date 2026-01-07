@@ -20,7 +20,7 @@ use crate::{
     Error,
     config::config_file::{ConfigFile, RuleConfigFile, parse_service},
     lists::ListType,
-    rate_limiter::{Probe, get_rate_limit_manager},
+    rate_limiter::{Probe, get_rate_limit_handle},
     rules::Rule,
     service_discovery::service_registry::Upstream,
     tls::acme::LETSENCRYPT_PRODUCTION_URL,
@@ -267,7 +267,7 @@ pub async fn load_and_validate() -> Result<Config, Error> {
             if let Some(limiter_cfg) = rule_config.limit {
                 let buffer = 1024; // todo make configurable
                 let (tx, rx) = mpsc::channel(buffer);
-                limiter_workers.push(get_rate_limit_manager(rx, limiter_cfg));
+                limiter_workers.push(get_rate_limit_handle(rx, limiter_cfg));
                 limiter_tx = Some(tx);
             }
 
