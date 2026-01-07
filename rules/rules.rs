@@ -29,6 +29,15 @@ pub type Context<'a> = bel::Context<'a>;
 pub struct RateLimit {
     pub max: u16,
     pub window: u16,
+    pub capacity: RateLimitBucketSize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "limit", rename_all = "snake_case")]
+pub enum RateLimitBucketSize {
+    // todo: some makro/crate to avoid this ugly pattern, which is a consequence of using heapless::index_map::FnvIndexMap
+    Bucket8,
+    Bucket9,
 }
 
 // pub struct CompiledRule {

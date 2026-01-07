@@ -1,8 +1,11 @@
-use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use heapless::index_map::Entry;
+use heapless::index_map::FnvIndexMap;
+use heapless::index_map::Iter;
 use rules::RateLimit;
+use rules::RateLimitBucketSize;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -10,33 +13,32 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 
 pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut limiter = RateLimiter::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
-        while let Some(probe) = rx.recv().await {
-            let result = limiter.can_resume(probe.ip);
-            let _ = probe.resp.send(result);
-
-            limiter.garbage_collect();
-        }
-    })
+    match limiter_cfg.capacity {
+        RateLimitBucketSize::Bucket8 => get_rate_limit_handle_b8(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket9 => get_rate_limit_handle_b9(rx, limiter_cfg),
+    }
 }
 
-pub fn get_probe(ip: IpAddr) -> (Probe, oneshot::Receiver<bool>) {
+pub fn get_probe(ip: IpAddr) -> (Probe, oneshot::Receiver<Response>) {
     let (tx, rx) = oneshot::channel();
     (Probe { ip, resp: tx }, rx)
 }
 
-type Responder = oneshot::Sender<bool>;
+type Response = Result<bool, ()>;
+type Responder = oneshot::Sender<Response>;
 pub struct Probe {
     ip: IpAddr,
     resp: Responder,
 }
 
-struct RateLimiter {
+struct RateLimiterBucket<const N: usize> {
+    inner: FnvIndexMap<IpAddr, SlidingWindow, N>,
+}
+struct RateLimiter<const N: usize> {
     limit: u16,
     sampling_period: Duration,
     current_window: Instant,
-    state: HashMap<IpAddr, SlidingWindow>, // todo: from heapless crate
+    bucket: RateLimiterBucket<N>,
 }
 
 struct SlidingWindow {
@@ -61,7 +63,31 @@ struct InMemorySampler {
     starts_at: Instant,
 }
 
-impl RateLimiter {
+impl<const N: usize> RateLimiterBucket<N> {
+    pub fn new() -> Self {
+        Self {
+            inner: FnvIndexMap::new(),
+        }
+    }
+
+    pub fn entry(&mut self, key: IpAddr) -> Entry<'_, IpAddr, SlidingWindow, N> {
+        self.inner.entry(key)
+    }
+
+    pub fn iter(&self) -> Iter<'_, IpAddr, SlidingWindow> {
+        self.inner.iter()
+    }
+
+    pub fn remove(&mut self, key: &IpAddr) -> Option<SlidingWindow> {
+        self.inner.remove(key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<const N: usize> RateLimiter<N> {
     pub fn new(limit: u16, sampling_period: Duration) -> Self {
         let current_window = Instant::now();
         let mut sanitized_limit = limit;
@@ -69,37 +95,42 @@ impl RateLimiter {
             sanitized_limit = limit - 1;
         }
 
-        RateLimiter {
+        Self {
             limit: sanitized_limit,
             sampling_period,
             current_window,
-            state: HashMap::new(),
+            bucket: RateLimiterBucket::new(),
         }
     }
 
-    pub fn can_resume(&mut self, ip: IpAddr) -> bool {
+    pub fn can_resume(&mut self, ip: IpAddr) -> Result<bool, ()> {
         let now = Instant::now();
         if now >= self.current_window + self.sampling_period {
             self.current_window = now;
         }
 
-        let mut result = false;
-        self.state
+        let mut can_resume = false;
+        if let Ok(_) = self
+            .bucket
             .entry(ip)
-            .and_modify(|x| result = x.can_resume(self.limit, self.current_window, self.sampling_period))
+            .and_modify(|x| can_resume = x.can_resume(self.limit, self.current_window, self.sampling_period))
             .or_insert_with(|| {
-                let mut new_ip_state = SlidingWindow::new(self.sampling_period, self.current_window);
-                result = new_ip_state.can_resume(self.limit, self.current_window, self.sampling_period);
-                new_ip_state
-            });
-        result
+                let mut new_ip_bucket = SlidingWindow::new(self.sampling_period, self.current_window);
+                can_resume = new_ip_bucket.can_resume(self.limit, self.current_window, self.sampling_period);
+                new_ip_bucket
+            })
+        {
+            return Ok(can_resume);
+        }
+
+        Err(())
     }
 
     pub fn garbage_collect(&mut self) {
         const ITEMS: usize = 2;
 
         let garbage: heapless::Vec<IpAddr, ITEMS> = self
-            .state
+            .bucket
             .iter()
             .filter(|(_, v)| v.get_last_sample_created_at().elapsed() > 2 * self.sampling_period)
             .take(ITEMS)
@@ -107,12 +138,12 @@ impl RateLimiter {
             .collect();
 
         for ip in garbage {
-            let _ = self.state.remove(&ip);
+            let _ = self.bucket.remove(&ip);
         }
     }
 
     pub fn len(&self) -> usize {
-        self.state.len()
+        self.bucket.len()
     }
 }
 
@@ -168,7 +199,7 @@ impl SlidingWindow {
 
 impl Sampler for InMemorySampler {
     fn new(starts_at: Instant) -> Self {
-        InMemorySampler { count: 0, starts_at }
+        Self { count: 0, starts_at }
     }
 
     fn increment(&mut self) {
@@ -197,6 +228,33 @@ impl Sampler for InMemorySampler {
     }
 }
 
+// todo: some makro/crate to avoid this ugly pattern, which is a consequence of using heapless::index_map::FnvIndexMap
+// todo: alternatively decide which buckets we want to support -- for reference see test_memory_footprint()
+fn get_rate_limit_handle_b8(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(8) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+
+            limiter.garbage_collect();
+        }
+    })
+}
+fn get_rate_limit_handle_b9(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(9) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+
+            limiter.garbage_collect();
+        }
+    })
+}
+
 #[cfg(feature = "test-utils")]
 #[cfg(test)]
 mod tests {
@@ -205,6 +263,21 @@ mod tests {
     use tokio::time::sleep;
 
     use super::*;
+
+    #[test]
+    fn test_memory_footprint() {
+        assert_eq!(17, std::mem::size_of::<IpAddr>());
+        assert_eq!(64, std::mem::size_of::<SlidingWindow>());
+
+        assert_eq!(96_469_040, std::mem::size_of::<RateLimiter<{ 2usize.pow(20) }>>()); // ~one milion IPs -> 96 MB of mem footprint
+
+        assert_eq!(23_600, std::mem::size_of::<RateLimiter<256>>()); // bucket_8 can store 256 IPs and consume 23.6 kB
+        assert_eq!(94_256, std::mem::size_of::<RateLimiter<1_024>>()); // bucket_10 -> 94 kB
+        assert_eq!(1_507_376, std::mem::size_of::<RateLimiter<{ 2usize.pow(14) }>>()); // bucket_14 -> 16 384 IPs -> 1.5 MB
+        assert_eq!(6_029_360, std::mem::size_of::<RateLimiter<{ 2usize.pow(16) }>>()); // 65 536 IPs -> 6 MB
+        assert_eq!(12_058_672, std::mem::size_of::<RateLimiter<{ 2usize.pow(17) }>>()); // 131 072 IPs -> 12 MB
+        assert_eq!(48_234_544, std::mem::size_of::<RateLimiter<{ 2usize.pow(19) }>>()); // 524 288 IPs -> 48 MB
+    }
 
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_alg() {
@@ -219,36 +292,38 @@ mod tests {
         //      = 49.5 requests
         let limit = 50;
         let sampling_period = Duration::from_secs(60);
-        let mut r = RateLimiter::new(limit, sampling_period);
+        let mut r = RateLimiter::<2>::new(limit, sampling_period);
         let ip = Ipv4Addr::new(1, 1, 1, 1).into();
 
         for _ in 0..limit {
-            assert!(r.can_resume(ip), "should allow until limit is not reached");
+            assert!(r.can_resume(ip).unwrap(), "should allow until limit is not reached");
         }
         for _ in 0..u16::MAX {
-            assert!(!r.can_resume(ip), "should break when limit reached");
+            assert!(!r.can_resume(ip).unwrap(), "should break when limit reached");
         }
         sleep(2 * sampling_period).await;
 
         for _ in 0..42 {
-            assert!(r.can_resume(ip), "should resume until limit is not reached");
+            assert!(r.can_resume(ip).unwrap(), "should resume until limit is not reached");
         }
 
         sleep(sampling_period + Duration::from_secs(15)).await;
         for _ in 0..19 {
-            assert!(r.can_resume(ip), "should resume for 42 * ((60-15)/60) + 19 = 50");
+            assert!(r.can_resume(ip).unwrap(), "should resume for 42 * ((60-15)/60) + 19 = 50");
         }
 
-        assert!(!r.can_resume(ip), "should break for 42 * ((60-15)/60) + 20 = 51");
+        assert!(!r.can_resume(ip).unwrap(), "should break for 42 * ((60-15)/60) + 20 = 51");
 
         sleep(Duration::from_secs(3)).await;
-        assert!(r.can_resume(ip), "should resume for 42 * ((60-(15+3))/60) + 21 = 50");
+        assert!(r.can_resume(ip).unwrap(), "should resume for 42 * ((60-(15+3))/60) + 21 = 50");
     }
+
+    // todo: test backpressure behavior
 
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_gc() {
         let sampling_period = Duration::from_secs(60);
-        let mut limiter = RateLimiter::new(10, sampling_period);
+        let mut limiter = RateLimiter::<8>::new(10, sampling_period);
         let ips = [
             Ipv4Addr::new(1, 1, 1, 1).into(),
             Ipv4Addr::new(2, 2, 2, 2).into(),
@@ -257,55 +332,71 @@ mod tests {
             Ipv4Addr::new(5, 5, 5, 5).into(),
         ];
         for ip in ips {
-            assert!(limiter.can_resume(ip));
+            assert!(limiter.can_resume(ip).unwrap());
         }
 
         sleep(sampling_period + Duration::from_secs(1)).await;
-        assert!(limiter.can_resume(ips[0]));
+        assert!(limiter.can_resume(ips[0]).unwrap());
         limiter.garbage_collect();
         assert_eq!(ips.len(), limiter.len());
 
         sleep(sampling_period).await;
-        assert!(limiter.can_resume(ips[0]));
+        assert!(limiter.can_resume(ips[0]).unwrap());
         limiter.garbage_collect();
         assert_eq!(
             ips.len() - 2,
             limiter.len(),
-            "should garbage collect entries that were not updated for 2 * window, but no more than 2"
+            "should garbage collect up to 2 entries that were not updated for 2 * window"
         );
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_boundary() {
-        let ip = Ipv4Addr::new(1, 1, 1, 1).into();
-        let mut r = RateLimiter::new(1, Duration::new(1, 0));
+        let ips = [
+            Ipv4Addr::new(1, 1, 1, 1).into(),
+            Ipv4Addr::new(2, 2, 2, 2).into(),
+            Ipv4Addr::new(3, 3, 3, 3).into(),
+        ];
+        let ip = ips[0];
+        let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
 
-        assert!(r.can_resume(ip), "should allow once when limit is 1");
-        assert!(!r.can_resume(ip), "should block on 2nd attempt when limit is 1");
+        assert!(r.can_resume(ip).unwrap(), "should allow once when limit is 1");
+        assert!(!r.can_resume(ip).unwrap(), "should block on 2nd attempt when limit is 1");
 
-        let mut r = RateLimiter::new(0, Duration::new(1, 0));
-        assert!(!r.can_resume(ip), "should treat zero limit as always limited");
-        assert!(!r.can_resume(ip), "should treat zero limit as always limited");
+        let mut r = RateLimiter::<2>::new(0, Duration::new(1, 0));
+        assert!(!r.can_resume(ip).unwrap(), "should treat zero limit as always limited");
+        assert!(!r.can_resume(ip).unwrap(), "should treat zero limit as always limited");
 
-        let mut r = RateLimiter::new(0, Duration::new(0, 0));
+        let mut r = RateLimiter::<2>::new(0, Duration::new(0, 0));
         assert!(
-            !r.can_resume(ip),
+            !r.can_resume(ip).unwrap(),
             "should treat zero limit as always limited, even when zero window"
         );
         assert!(
-            !r.can_resume(ip),
+            !r.can_resume(ip).unwrap(),
             "should treat zero limit as always limited, even when zero window"
         );
 
-        let mut r = RateLimiter::new(1, Duration::new(1, 0));
-        assert!(r.can_resume(ip), "allow - limit should take precedense over zero window");
-        assert!(!r.can_resume(ip), "block - limit should take precedense over zero window");
+        let mut r = RateLimiter::<2>::new(1, Duration::new(0, 0));
+        assert!(
+            r.can_resume(ip).unwrap(),
+            "allow - limit should take precedense over zero window"
+        );
+        assert!(
+            !r.can_resume(ip).unwrap(),
+            "block - limit should take precedense over zero window"
+        );
 
-        let mut r = RateLimiter::new(u16::MAX, Duration::new(1, 0));
+        let mut r = RateLimiter::<2>::new(u16::MAX, Duration::new(1, 0));
         for _ in 1..u16::MAX {
-            assert!(r.can_resume(ip), "allow - should handle limit overflow");
+            assert!(r.can_resume(ip).unwrap(), "allow - should handle limit overflow");
         }
-        assert!(!r.can_resume(ip), "block - should handle limit overflow");
+        assert!(!r.can_resume(ip).unwrap(), "block - should handle limit overflow");
+
+        let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
+        assert!(r.can_resume(ips[0]).unwrap(), "allow - should handle this IP");
+        assert!(r.can_resume(ips[1]).unwrap(), "allow - should handle that IP");
+        assert!(r.can_resume(ips[2]).is_err(), "error - should backpressure on another IP");
     }
 
     #[tokio::test(start_paused = true)]

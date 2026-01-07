@@ -120,6 +120,23 @@ Valid lists types:
 
 ## Rate limiting
 
+Algorithm used to evaluate a request is a [sliding
+window](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/)
+that uses request count from both current and previous period.
+
+`max` (u16) number of requests in given `period` (u16) denominated in seconds.
+Rate limiters have finite `capacity` measured in buckets. E.g. `bucket_8` can
+store no more than 256 entries in a timeframe of 2x `period`.
+
+Available bucket sizes range from `bucket_8` up to `bucket_30`.
+
+For a case when `max` threshold is crossed Pingoo responds with [HTTP 429 Too
+Many
+Requests](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/429).
+For a case where `capacity` bucket is full Pingoo responds with [HTTP 503
+Service
+Unavailable](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/503).
+
 **pingoo.yml**
 ```yml
 rules:
@@ -129,5 +146,16 @@ rules:
       - action: limit
     limit:
       max: 10
-      window: 60
+      period: 60
+      capacity: bucket_10
 ```
+
+In this example Pingoo:
+* protects resources under `/api` route
+* allows no more than 10 requests per ONE minute
+* starts returning HTTP 429 to the specific client, when number of incoming
+  requests from IP address of that client crossed the threshold of 10 in
+  sampling period of ONE minute
+* can count requests for 1024 (2^10) unique IP addresses on every TWO minutes
+* starts returning HTTP 503 to any client when on every TWO minutes period at
+  least one request came from 1024 unique IP addresses 
