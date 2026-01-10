@@ -125,10 +125,18 @@ window](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/)
 that uses request count from both current and previous period.
 
 `max` (u16) number of requests in given `period` (u16) denominated in seconds.
-Rate limiters have finite `capacity` measured in buckets. E.g. `bucket_8` can
-store no more than 256 entries in a timeframe of 2x `period`.
+Rate limiters have finite `capacity` measured in buckets. E.g. `bucket_10` can
+store no more than 1024 entries in a timeframe of 2x `period`.
 
-Available bucket sizes range from `bucket_8` up to `bucket_30`.
+Available bucket sizes are:
+* `bucket_10` --> stores up to 1024 IPs (2^10), consumes additional 53.3 kB of memory
+* `bucket_14` --> stores up to ~16k IPs (2^14), consumes additional 852 kB of memory
+* `bucket_16` --> stores up to ~65k IPs (2^16), consumes additional 3.4 MB of memory
+* `bucket_17` --> stores up to ~130k IPs (2^17), consumes additional 6.8 MB of memory
+* `bucket_19` --> stores up to ~524k IPs (2^19), consumes additional 27.2 MB of memory
+* `bucket_20` --> stores up to ~1 million IPs (2^20), consumes additional 54.5 MB of memory
+* `bucket_23` --> stores up to ~9 million IPs (2^23), consumes additional 436.2 MB of memory
+* `bucket_24` --> stores up to ~130k IPs (2^24), consumes additional 872.4 MB of memory
 
 For a case when `max` threshold is crossed Pingoo responds with [HTTP 429 Too
 Many
@@ -156,6 +164,5 @@ In this example Pingoo:
 * starts returning HTTP 429 to the specific client, when number of incoming
   requests from IP address of that client crossed the threshold of 10 in
   sampling period of ONE minute
-* can count requests for 1024 (2^10) unique IP addresses on every TWO minutes
-* starts returning HTTP 503 to any client when on every TWO minutes period at
-  least one request came from 1024 unique IP addresses 
+* can count requests for 1024 (2^10) unique IP addresses on every minute
+* starts returning HTTP 503 to new clients if their IP is not in the bucket

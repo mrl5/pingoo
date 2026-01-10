@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -34,10 +32,16 @@ pub struct RateLimit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "limit", rename_all = "snake_case")]
+/// Number is power (exponent) of 2 -- it defines number of unique IPs that can be tracked
 pub enum RateLimitBucketSize {
-    // todo: some makro/crate to avoid this ugly pattern, which is a consequence of using heapless::index_map::FnvIndexMap
-    Bucket8,
-    Bucket9,
+    Bucket10 = 2isize.pow(10),
+    Bucket14 = 2isize.pow(14),
+    Bucket16 = 2isize.pow(16),
+    Bucket17 = 2isize.pow(17),
+    Bucket19 = 2isize.pow(19),
+    Bucket20 = 2isize.pow(20),
+    Bucket23 = 2isize.pow(23),
+    Bucket24 = 2isize.pow(24),
 }
 
 // pub struct CompiledRule {

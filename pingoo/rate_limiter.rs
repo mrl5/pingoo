@@ -10,8 +10,17 @@ use tokio::time::Instant;
 
 pub fn get_rate_limit_handle(rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     match limiter_cfg.capacity {
-        RateLimitBucketSize::Bucket8 => get_rate_limit_handle_b8(rx, limiter_cfg),
-        RateLimitBucketSize::Bucket9 => get_rate_limit_handle_b9(rx, limiter_cfg),
+        // duplicated logic in each function is a consequence of using heapless::index_map::FnvIndexMap
+        // the only difference between them is Map capacity
+        // todo: some cleaner solution -- macro maybe?
+        RateLimitBucketSize::Bucket10 => get_rate_limit_handle_b10(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket14 => get_rate_limit_handle_b14(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket16 => get_rate_limit_handle_b16(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket17 => get_rate_limit_handle_b17(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket19 => get_rate_limit_handle_b19(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket20 => get_rate_limit_handle_b20(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket23 => get_rate_limit_handle_b23(rx, limiter_cfg),
+        RateLimitBucketSize::Bucket24 => get_rate_limit_handle_b24(rx, limiter_cfg),
     }
 }
 
@@ -167,11 +176,9 @@ fn create_prev_window(instant: Instant, sampling_period: Duration) -> Instant {
     instant - sampling_period
 }
 
-// todo: some makro/crate to avoid this ugly pattern, which is a consequence of using heapless::index_map::FnvIndexMap
-// todo: alternatively decide which buckets we want to support -- for reference see test_memory_footprint()
-fn get_rate_limit_handle_b8(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+fn get_rate_limit_handle_b10(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     let mut limiter =
-        RateLimiter::<{ 2usize.pow(8) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+        RateLimiter::<{ 2usize.pow(10) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
     tokio::spawn(async move {
         while let Some(probe) = rx.recv().await {
             let result = limiter.can_resume(probe.ip);
@@ -179,9 +186,69 @@ fn get_rate_limit_handle_b8(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimi
         }
     })
 }
-fn get_rate_limit_handle_b9(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+fn get_rate_limit_handle_b14(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     let mut limiter =
-        RateLimiter::<{ 2usize.pow(9) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+        RateLimiter::<{ 2usize.pow(14) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b16(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(16) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b17(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(17) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b19(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(19) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b20(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(20) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b23(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(23) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
+    tokio::spawn(async move {
+        while let Some(probe) = rx.recv().await {
+            let result = limiter.can_resume(probe.ip);
+            let _ = probe.resp.send(result);
+        }
+    })
+}
+fn get_rate_limit_handle_b24(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+    let mut limiter =
+        RateLimiter::<{ 2usize.pow(24) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
     tokio::spawn(async move {
         while let Some(probe) = rx.recv().await {
             let result = limiter.can_resume(probe.ip);
@@ -255,19 +322,28 @@ mod tests {
         }
     }
 
-    // todo: test backpressure behavior
-
     #[tokio::test(start_paused = true)]
     async fn test_rate_limiter_backpressure() {
+        let sampling_period = Duration::new(1, 0);
         let ips = [
             Ipv4Addr::new(1, 1, 1, 1).into(),
             Ipv4Addr::new(2, 2, 2, 2).into(),
             Ipv4Addr::new(3, 3, 3, 3).into(),
+            Ipv4Addr::new(4, 4, 4, 4).into(),
         ];
-        let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
+        let mut r = RateLimiter::<2>::new(10, sampling_period);
         assert!(r.can_resume(ips[0]).unwrap(), "allow - should handle this IP");
         assert!(r.can_resume(ips[1]).unwrap(), "allow - should handle that IP");
         assert!(r.can_resume(ips[2]).is_err(), "error - should backpressure on another IP");
+        assert!(r.can_resume(ips[0]).unwrap(), "allow - should still handle this IP");
+        assert!(r.can_resume(ips[1]).unwrap(), "allow - should still handle that IP");
+        assert!(r.can_resume(ips[2]).is_err(), "error - should again backpressure on another IP");
+
+        sleep(sampling_period).await;
+        assert!(r.can_resume(ips[2]).unwrap(), "allow - another IP after bucket rotation");
+        assert!(r.can_resume(ips[3]).unwrap(), "allow - new IP after bucket rotation");
+        assert!(r.can_resume(ips[0]).is_err(), "error - should backpressure on this IP");
+        assert!(r.can_resume(ips[1]).is_err(), "error - should backpressure on that IP");
     }
 
     #[tokio::test(start_paused = true)]
