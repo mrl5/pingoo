@@ -1,18 +1,14 @@
-use std::net::IpAddr;
-use std::sync::Arc;
-
-use heapless::index_map::Entry;
 use heapless::index_map::FnvIndexMap;
-use heapless::index_map::Iter;
 use rules::RateLimit;
 use rules::RateLimitBucketSize;
+use std::net::IpAddr;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
-pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
+pub fn get_rate_limit_handle(rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     match limiter_cfg.capacity {
         RateLimitBucketSize::Bucket8 => get_rate_limit_handle_b8(rx, limiter_cfg),
         RateLimitBucketSize::Bucket9 => get_rate_limit_handle_b9(rx, limiter_cfg),
@@ -32,200 +28,143 @@ pub struct Probe {
 }
 
 struct RateLimiterBucket<const N: usize> {
-    inner: FnvIndexMap<IpAddr, SlidingWindow, N>,
+    starts_at: Instant,
+    inner: FnvIndexMap<IpAddr, Counter, N>,
 }
 struct RateLimiter<const N: usize> {
     limit: u16,
     sampling_period: Duration,
-    current_window: Instant,
-    bucket: RateLimiterBucket<N>,
+    bucket_green: RateLimiterBucket<N>,
+    bucket_blue: RateLimiterBucket<N>,
 }
 
-struct SlidingWindow {
-    sampler_green: InMemorySampler,
-    sampler_blue: InMemorySampler,
-    curr_sampler: Arc<InMemorySampler>,
-    prev_sampler: Arc<InMemorySampler>,
-}
-
-trait Sampler {
-    fn new(starts_at: Instant) -> Self;
-    fn increment(&mut self);
-    fn reset(&mut self, starts_at: Instant);
-    fn get_count(&self) -> u16;
-    fn get_starts_at(&self) -> Instant;
-    fn get_approx(&self, sampling_period: Duration, next_window_needle: Duration) -> u64;
-}
-
-#[derive(Debug, Copy, Clone)]
-struct InMemorySampler {
-    count: u16,
-    starts_at: Instant,
+#[derive(Debug)]
+struct Counter {
+    pub sum: u16,
 }
 
 impl<const N: usize> RateLimiterBucket<N> {
-    pub fn new() -> Self {
+    pub fn new(starts_at: Instant) -> Self {
         Self {
+            starts_at,
             inner: FnvIndexMap::new(),
         }
-    }
-
-    pub fn entry(&mut self, key: IpAddr) -> Entry<'_, IpAddr, SlidingWindow, N> {
-        self.inner.entry(key)
-    }
-
-    pub fn iter(&self) -> Iter<'_, IpAddr, SlidingWindow> {
-        self.inner.iter()
-    }
-
-    pub fn remove(&mut self, key: &IpAddr) -> Option<SlidingWindow> {
-        self.inner.remove(key)
-    }
-
-    pub fn len(&self) -> usize {
-        self.inner.len()
     }
 }
 
 impl<const N: usize> RateLimiter<N> {
     pub fn new(limit: u16, sampling_period: Duration) -> Self {
-        let current_window = Instant::now();
         let mut sanitized_limit = limit;
         if limit == u16::MAX {
             sanitized_limit = limit - 1;
         }
 
+        let now = Instant::now();
+        let before = create_prev_window(now, sampling_period);
+
+        let bucket_green = RateLimiterBucket::new(now);
+        let bucket_blue = RateLimiterBucket::new(before);
+
         Self {
             limit: sanitized_limit,
             sampling_period,
-            current_window,
-            bucket: RateLimiterBucket::new(),
+            bucket_green,
+            bucket_blue,
         }
     }
 
     pub fn can_resume(&mut self, ip: IpAddr) -> Result<bool, ()> {
+        if self.limit == 0 {
+            return Ok(false);
+        }
+
+        let is_green_bucket_current = self.bucket_green.starts_at >= self.bucket_blue.starts_at;
+        let starts_at = match is_green_bucket_current {
+            true => self.bucket_green.starts_at,
+            false => self.bucket_blue.starts_at,
+        };
         let now = Instant::now();
-        if now >= self.current_window + self.sampling_period {
-            self.current_window = now;
+        if !self.is_within_curr_bucket_window(now, starts_at) && self.sampling_period > Duration::from_nanos(0) {
+            if self.is_outside_next_monothonic_window(now, self.bucket_green.starts_at) {
+                self.bucket_green = RateLimiterBucket::new(now);
+                self.bucket_blue = RateLimiterBucket::new(now);
+            } else {
+                // current bucket becomes previous
+                if is_green_bucket_current {
+                    let starts_at = self.bucket_green.starts_at + self.sampling_period;
+                    self.bucket_blue = RateLimiterBucket::new(starts_at);
+                } else {
+                    let starts_at = self.bucket_blue.starts_at + self.sampling_period;
+                    self.bucket_green = RateLimiterBucket::new(starts_at);
+                }
+            }
         }
 
-        let mut can_resume = false;
-        if let Ok(_) = self
-            .bucket
+        let is_green_bucket_current = self.bucket_green.starts_at >= self.bucket_blue.starts_at;
+        let (curr_bucket, prev_bucket) = match is_green_bucket_current {
+            true => (&mut self.bucket_green, &mut self.bucket_blue),
+            false => (&mut self.bucket_blue, &mut self.bucket_green),
+        };
+
+        let curr_counter = curr_bucket
+            .inner
             .entry(ip)
-            .and_modify(|x| can_resume = x.can_resume(self.limit, self.current_window, self.sampling_period))
-            .or_insert_with(|| {
-                let mut new_ip_bucket = SlidingWindow::new(self.sampling_period, self.current_window);
-                can_resume = new_ip_bucket.can_resume(self.limit, self.current_window, self.sampling_period);
-                new_ip_bucket
+            .and_modify(|x| {
+                x.increment();
             })
-        {
-            return Ok(can_resume);
+            .or_insert_with(|| {
+                let mut x = Counter::new();
+                x.increment();
+                x
+            });
+        if curr_counter.is_err() {
+            return Err(());
         }
+        let curr_sum = curr_counter.expect("counter should exist").sum;
 
-        Err(())
+        let prev_sum = match prev_bucket.inner.get(&ip) {
+            Some(c) => c.sum,
+            None => 0,
+        };
+
+        let approx = get_approx(prev_sum, curr_bucket.starts_at.elapsed(), self.sampling_period);
+        Ok(u64::from(self.limit) >= approx + u64::from(curr_sum))
     }
 
-    pub fn garbage_collect(&mut self) {
-        const ITEMS: usize = 2;
-
-        let garbage: heapless::Vec<IpAddr, ITEMS> = self
-            .bucket
-            .iter()
-            .filter(|(_, v)| v.get_last_sample_created_at().elapsed() > 2 * self.sampling_period)
-            .take(ITEMS)
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for ip in garbage {
-            let _ = self.bucket.remove(&ip);
-        }
+    fn is_within_curr_bucket_window(&self, now: Instant, curr_starts_at: Instant) -> bool {
+        let next_monothonic_window = curr_starts_at + self.sampling_period;
+        now < next_monothonic_window
     }
 
-    pub fn len(&self) -> usize {
-        self.bucket.len()
+    fn is_outside_next_monothonic_window(&self, now: Instant, curr_starts_at: Instant) -> bool {
+        let next_monothonic_window = curr_starts_at + 2 * self.sampling_period;
+        now >= next_monothonic_window
     }
 }
 
-impl SlidingWindow {
-    pub fn new(sampling_period: Duration, current_window: Instant) -> Self {
-        let prev_window = current_window - sampling_period;
-
-        let curr = InMemorySampler::new(current_window);
-        let prev = InMemorySampler::new(prev_window);
-        SlidingWindow {
-            sampler_green: prev,
-            sampler_blue: curr,
-            curr_sampler: Arc::new(curr),
-            prev_sampler: Arc::new(prev),
-        }
+impl Counter {
+    pub fn new() -> Self {
+        Self { sum: 0 }
     }
 
-    pub fn can_resume(&mut self, limit: u16, current_window: Instant, sampling_period: Duration) -> bool {
-        if limit == 0 {
-            return false;
-        }
-
-        if current_window != self.curr_sampler.get_starts_at() {
-            self.shuffle_samplers(current_window, sampling_period);
-        }
-
-        Arc::make_mut(&mut self.curr_sampler).increment();
-
-        let approx = self
-            .prev_sampler
-            .get_approx(sampling_period, self.prev_sampler.get_starts_at().elapsed() - sampling_period);
-        let current_count = self.curr_sampler.get_count();
-
-        u64::from(limit) >= approx + u64::from(current_count)
-    }
-
-    pub fn get_last_sample_created_at(&self) -> Instant {
-        self.curr_sampler.starts_at
-    }
-
-    fn shuffle_samplers(&mut self, current_window: Instant, sampling_period: Duration) {
-        let mut next_sampler = self.prev_sampler.clone();
-        Arc::make_mut(&mut next_sampler).reset(current_window);
-
-        if current_window.elapsed() > sampling_period + self.curr_sampler.get_starts_at().elapsed() {
-            Arc::make_mut(&mut self.curr_sampler).reset(current_window - sampling_period);
-        }
-
-        self.prev_sampler = self.curr_sampler.clone();
-        self.curr_sampler = next_sampler;
+    pub fn increment(&mut self) {
+        self.sum = self.sum.saturating_add(1);
     }
 }
 
-impl Sampler for InMemorySampler {
-    fn new(starts_at: Instant) -> Self {
-        Self { count: 0, starts_at }
+fn get_approx(prev_counter: u16, window_needle: Duration, sampling_period: Duration) -> u64 {
+    if window_needle >= sampling_period {
+        return 0;
     }
 
-    fn increment(&mut self) {
-        self.count = self.count.saturating_add(1);
-    }
+    u64::from(prev_counter) * (sampling_period.as_secs() - window_needle.as_secs()) / sampling_period.as_secs()
+}
 
-    fn reset(&mut self, starts_at: Instant) {
-        self.count = 0;
-        self.starts_at = starts_at;
+fn create_prev_window(instant: Instant, sampling_period: Duration) -> Instant {
+    if instant.elapsed() < sampling_period {
+        return instant;
     }
-
-    fn get_count(&self) -> u16 {
-        self.count
-    }
-
-    fn get_starts_at(&self) -> Instant {
-        self.starts_at
-    }
-
-    fn get_approx(&self, sampling_period: Duration, next_window_needle: Duration) -> u64 {
-        if next_window_needle >= sampling_period {
-            return 0;
-        }
-
-        u64::from(self.count) * (sampling_period.as_secs() - next_window_needle.as_secs()) / sampling_period.as_secs()
-    }
+    instant - sampling_period
 }
 
 // todo: some makro/crate to avoid this ugly pattern, which is a consequence of using heapless::index_map::FnvIndexMap
@@ -237,8 +176,6 @@ fn get_rate_limit_handle_b8(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimi
         while let Some(probe) = rx.recv().await {
             let result = limiter.can_resume(probe.ip);
             let _ = probe.resp.send(result);
-
-            limiter.garbage_collect();
         }
     })
 }
@@ -249,8 +186,6 @@ fn get_rate_limit_handle_b9(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimi
         while let Some(probe) = rx.recv().await {
             let result = limiter.can_resume(probe.ip);
             let _ = probe.resp.send(result);
-
-            limiter.garbage_collect();
         }
     })
 }
@@ -265,18 +200,20 @@ mod tests {
     use super::*;
 
     #[test]
+    // this test case serves more for memory footprint documentation
     fn test_memory_footprint() {
         assert_eq!(17, std::mem::size_of::<IpAddr>());
-        assert_eq!(64, std::mem::size_of::<SlidingWindow>());
+        assert_eq!(2, std::mem::size_of::<Counter>());
 
-        assert_eq!(96_469_040, std::mem::size_of::<RateLimiter<{ 2usize.pow(20) }>>()); // ~one milion IPs -> 96 MB of mem footprint
+        assert_eq!(54_526_024, std::mem::size_of::<RateLimiter<{ 2usize.pow(20) }>>()); // ~million IPs -> 54.5 MB of mem footprint
 
-        assert_eq!(23_600, std::mem::size_of::<RateLimiter<256>>()); // bucket_8 can store 256 IPs and consume 23.6 kB
-        assert_eq!(94_256, std::mem::size_of::<RateLimiter<1_024>>()); // bucket_10 -> 94 kB
-        assert_eq!(1_507_376, std::mem::size_of::<RateLimiter<{ 2usize.pow(14) }>>()); // bucket_14 -> 16 384 IPs -> 1.5 MB
-        assert_eq!(6_029_360, std::mem::size_of::<RateLimiter<{ 2usize.pow(16) }>>()); // 65 536 IPs -> 6 MB
-        assert_eq!(12_058_672, std::mem::size_of::<RateLimiter<{ 2usize.pow(17) }>>()); // 131 072 IPs -> 12 MB
-        assert_eq!(48_234_544, std::mem::size_of::<RateLimiter<{ 2usize.pow(19) }>>()); // 524 288 IPs -> 48 MB
+        assert_eq!(53_320, std::mem::size_of::<RateLimiter<1_024>>()); // bucket_10 can store 1024 IPs and consume 53 kB
+        assert_eq!(852_040, std::mem::size_of::<RateLimiter<{ 2usize.pow(14) }>>()); // bucket_14 -> 16 384 IPs -> 852 kB
+        assert_eq!(3_407_944, std::mem::size_of::<RateLimiter<{ 2usize.pow(16) }>>()); // 65 536 IPs -> 3.4 MB
+        assert_eq!(6_815_816, std::mem::size_of::<RateLimiter<{ 2usize.pow(17) }>>()); // 131 072 IPs -> 6.8 MB
+        assert_eq!(27_263_048, std::mem::size_of::<RateLimiter<{ 2usize.pow(19) }>>()); // 524 288 IPs -> 27.2 MB
+        assert_eq!(436_207_688, std::mem::size_of::<RateLimiter<{ 2usize.pow(23) }>>()); // ~9 million IPs -> 436.2 MB
+        assert_eq!(872_415_304, std::mem::size_of::<RateLimiter<{ 2usize.pow(24) }>>()); // ~17 million IPs -> 872.4 MB
     }
 
     #[tokio::test(start_paused = true)]
@@ -295,14 +232,6 @@ mod tests {
         let mut r = RateLimiter::<2>::new(limit, sampling_period);
         let ip = Ipv4Addr::new(1, 1, 1, 1).into();
 
-        for _ in 0..limit {
-            assert!(r.can_resume(ip).unwrap(), "should allow until limit is not reached");
-        }
-        for _ in 0..u16::MAX {
-            assert!(!r.can_resume(ip).unwrap(), "should break when limit reached");
-        }
-        sleep(2 * sampling_period).await;
-
         for _ in 0..42 {
             assert!(r.can_resume(ip).unwrap(), "should resume until limit is not reached");
         }
@@ -316,52 +245,38 @@ mod tests {
 
         sleep(Duration::from_secs(3)).await;
         assert!(r.can_resume(ip).unwrap(), "should resume for 42 * ((60-(15+3))/60) + 21 = 50");
+
+        sleep(2 * sampling_period).await;
+        for _ in 0..limit {
+            assert!(r.can_resume(ip).unwrap(), "should allow until limit is not reached");
+        }
+        for _ in 0..u16::MAX {
+            assert!(!r.can_resume(ip).unwrap(), "should break when limit reached");
+        }
     }
 
     // todo: test backpressure behavior
 
     #[tokio::test(start_paused = true)]
-    async fn test_rate_limiter_gc() {
-        let sampling_period = Duration::from_secs(60);
-        let mut limiter = RateLimiter::<8>::new(10, sampling_period);
+    async fn test_rate_limiter_backpressure() {
         let ips = [
             Ipv4Addr::new(1, 1, 1, 1).into(),
             Ipv4Addr::new(2, 2, 2, 2).into(),
             Ipv4Addr::new(3, 3, 3, 3).into(),
-            Ipv4Addr::new(4, 4, 4, 4).into(),
-            Ipv4Addr::new(5, 5, 5, 5).into(),
         ];
-        for ip in ips {
-            assert!(limiter.can_resume(ip).unwrap());
-        }
-
-        sleep(sampling_period + Duration::from_secs(1)).await;
-        assert!(limiter.can_resume(ips[0]).unwrap());
-        limiter.garbage_collect();
-        assert_eq!(ips.len(), limiter.len());
-
-        sleep(sampling_period).await;
-        assert!(limiter.can_resume(ips[0]).unwrap());
-        limiter.garbage_collect();
-        assert_eq!(
-            ips.len() - 2,
-            limiter.len(),
-            "should garbage collect up to 2 entries that were not updated for 2 * window"
-        );
+        let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
+        assert!(r.can_resume(ips[0]).unwrap(), "allow - should handle this IP");
+        assert!(r.can_resume(ips[1]).unwrap(), "allow - should handle that IP");
+        assert!(r.can_resume(ips[2]).is_err(), "error - should backpressure on another IP");
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_rate_limiter_boundary() {
-        let ips = [
-            Ipv4Addr::new(1, 1, 1, 1).into(),
-            Ipv4Addr::new(2, 2, 2, 2).into(),
-            Ipv4Addr::new(3, 3, 3, 3).into(),
-        ];
-        let ip = ips[0];
+    async fn test_rate_limiter_boundary_single_ip() {
+        let ip = Ipv4Addr::new(1, 1, 1, 1).into();
         let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
 
         assert!(r.can_resume(ip).unwrap(), "should allow once when limit is 1");
-        assert!(!r.can_resume(ip).unwrap(), "should block on 2nd attempt when limit is 1");
+        assert!(!r.can_resume(ip).unwrap(), "should block n 2nd attempt when limit is 1");
 
         let mut r = RateLimiter::<2>::new(0, Duration::new(1, 0));
         assert!(!r.can_resume(ip).unwrap(), "should treat zero limit as always limited");
@@ -392,26 +307,40 @@ mod tests {
             assert!(r.can_resume(ip).unwrap(), "allow - should handle limit overflow");
         }
         assert!(!r.can_resume(ip).unwrap(), "block - should handle limit overflow");
-
-        let mut r = RateLimiter::<2>::new(1, Duration::new(1, 0));
-        assert!(r.can_resume(ips[0]).unwrap(), "allow - should handle this IP");
-        assert!(r.can_resume(ips[1]).unwrap(), "allow - should handle that IP");
-        assert!(r.can_resume(ips[2]).is_err(), "error - should backpressure on another IP");
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_inmemory_get_approx() {
         let sampling_period = Duration::from_secs(60);
-        let mut r = InMemorySampler::new(Instant::now());
+        let mut counter: u16 = 0;
         sleep(sampling_period).await;
         for _ in 0..42 {
-            r.increment();
+            counter = counter.saturating_add(1);
         }
 
         let start = Instant::now();
-        assert_eq!(42, r.get_count());
-        assert_eq!(42, r.get_approx(sampling_period, start.elapsed(),));
+        assert_eq!(42, counter);
+        assert_eq!(42, get_approx(counter, start.elapsed(), sampling_period));
         sleep(Duration::from_secs(15)).await;
-        assert_eq!(31, r.get_approx(sampling_period, start.elapsed(),));
+        assert_eq!(31, get_approx(counter, start.elapsed(), sampling_period));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_create_prev_window() {
+        let sampling_window = Duration::from_secs(60);
+
+        for tc in vec![0, 13, 59] {
+            let now = Instant::now();
+            let offset = Duration::from_secs(tc);
+            sleep(offset).await;
+            assert_eq!(now, create_prev_window(now, sampling_window));
+        }
+
+        for tc in vec![60, 73, 119] {
+            let now = Instant::now();
+            let offset = Duration::from_secs(tc);
+            sleep(offset).await;
+            assert_eq!(now - sampling_window, create_prev_window(now, sampling_window));
+        }
     }
 }
