@@ -1,17 +1,15 @@
 {
   "dockerFile": "Dockerfile",
   "customizations": {
-    // Configure properties specific to VS Code.
     "vscode": {
-      // Set *default* container specific settings.json values on container create.
       "settings": {
         "rust-analyzer.cargo.features": ["test-utils"],
         "rust-analyzer.check.features": ["test-utils"],
         "rust-analyzer.runnables.extraArgs": [
           "--features",
           "test-utils"
-        ],
-      },
+        ]
+      }
     }
   },
   "extensions": [

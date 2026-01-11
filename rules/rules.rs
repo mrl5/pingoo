@@ -27,21 +27,7 @@ pub type Context<'a> = bel::Context<'a>;
 pub struct RateLimit {
     pub max: u16,
     pub window: u16,
-    pub capacity: RateLimitBucketSize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-/// Number is power (exponent) of 2 -- it defines number of unique IPs that can be tracked
-pub enum RateLimitBucketSize {
-    Bucket10 = 2isize.pow(10),
-    Bucket14 = 2isize.pow(14),
-    Bucket16 = 2isize.pow(16),
-    Bucket17 = 2isize.pow(17),
-    Bucket19 = 2isize.pow(19),
-    Bucket20 = 2isize.pow(20),
-    Bucket23 = 2isize.pow(23),
-    Bucket24 = 2isize.pow(24),
+    pub capacity: usize,
 }
 
 // pub struct CompiledRule {

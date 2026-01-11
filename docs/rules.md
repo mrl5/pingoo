@@ -124,18 +124,9 @@ Algorithm used is the [sliding window](https://blog.cloudflare.com/counting-thin
 that uses request count from both current and previous period.
 
 `max` (u16) number of requests in given `period` (u16) denominated in seconds.
-Rate limiters have finite `capacity` measured in buckets. E.g. `bucket10` can
-store no more than 1024 entries in a timeframe of 2x `period`.
-
-Available bucket sizes are:
-* `bucket10` --> stores up to 1024 IPs (2^10), consumes additional 53.3 kB of memory
-* `bucket14` --> stores up to ~16k IPs (2^14), consumes additional 852 kB of memory
-* `bucket16` --> stores up to ~65k IPs (2^16), consumes additional 3.4 MB of memory
-* `bucket17` --> stores up to ~130k IPs (2^17), consumes additional 6.8 MB of memory
-* `bucket19` --> stores up to ~524k IPs (2^19), consumes additional 27.2 MB of memory
-* `bucket20` --> stores up to ~1 million IPs (2^20), consumes additional 54.5 MB of memory
-* `bucket23` --> stores up to ~9 million IPs (2^23), consumes additional 436.2 MB of memory
-* `bucket24` --> stores up to ~17 million IPs (2^24), consumes additional 872.4 MB of memory
+Rate limiters have finite `capacity` that should be a power of 2 (otherwise
+next power of 2 will be allocated). E.g. `capacity: 1024` can store no more
+than 1024 entries in a `period`.
 
 For a case when `max` threshold is crossed Pingoo responds with [HTTP 429 Too
 Many
@@ -154,7 +145,7 @@ rules:
     limit:
       max: 10
       period: 60
-      capacity: bucket10
+      capacity: 1024
 ```
 
 In this example Pingoo:
