@@ -31,7 +31,7 @@ pub struct RateLimit {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "limit", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 /// Number is power (exponent) of 2 -- it defines number of unique IPs that can be tracked
 pub enum RateLimitBucketSize {
     Bucket10 = 2isize.pow(10),

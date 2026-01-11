@@ -176,6 +176,8 @@ fn create_prev_window(instant: Instant, sampling_period: Duration) -> Instant {
     instant - sampling_period
 }
 
+// start of duplicated fuctions. Only power of 2 changes but it must be constant so ...
+// todo: perhaps could be impr with macro
 fn get_rate_limit_handle_b10(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     let mut limiter =
         RateLimiter::<{ 2usize.pow(10) }>::new(limiter_cfg.max, Duration::from_secs(u64::from(limiter_cfg.window)));
@@ -267,7 +269,7 @@ mod tests {
     use super::*;
 
     #[test]
-    // this test case serves more for memory footprint documentation
+    // this test case documents memory footprint
     fn test_memory_footprint() {
         assert_eq!(17, std::mem::size_of::<IpAddr>());
         assert_eq!(2, std::mem::size_of::<Counter>());
@@ -382,11 +384,13 @@ mod tests {
         for _ in 1..u16::MAX {
             assert!(r.can_resume(ip).unwrap(), "allow - should handle limit overflow");
         }
-        assert!(!r.can_resume(ip).unwrap(), "block - should handle limit overflow");
+        for _ in 0..u16::MAX {
+            assert!(!r.can_resume(ip).unwrap(), "block - should handle limit overflow");
+        }
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_inmemory_get_approx() {
+    async fn test_get_approx() {
         let sampling_period = Duration::from_secs(60);
         let mut counter: u16 = 0;
         sleep(sampling_period).await;

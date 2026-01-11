@@ -84,7 +84,7 @@ pub fn new_service_unavailable_error_503() -> Response<BoxBody<Bytes, hyper::Err
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .header(header::CACHE_CONTROL, &CACHE_CONTROL_NO_CACHE)
         .body(res_body)
-        .expect("error building new_bad_gateway_error");
+        .expect("error building new_service_unavailable_error_503");
 }
 
 pub fn new_not_found_error() -> Response<BoxBody<Bytes, hyper::Error>> {
@@ -132,7 +132,7 @@ pub fn new_too_many_requests_response_429() -> Response<BoxBody<Bytes, hyper::Er
         .status(StatusCode::TOO_MANY_REQUESTS)
         .header(header::CACHE_CONTROL, &CACHE_CONTROL_NO_CACHE)
         .body(res_body)
-        .expect("error building new_method_not_allowed_error");
+        .expect("error building new_too_many_requests_response_429");
 }
 
 pub fn get_path(req: &Request<Incoming>) -> &str {
