@@ -1,11 +1,45 @@
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
 use rules::RateLimit;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tracing::error;
+
+use crate::services::http_utils::new_internal_error_response_500;
+use crate::services::http_utils::new_service_unavailable_error_503;
+use crate::services::http_utils::new_too_many_requests_response_429;
+
+pub async fn limit_http_request(ip: IpAddr, tx: Sender<Probe>) -> Option<http::Response<BoxBody<Bytes, hyper::Error>>> {
+    let (probe, rx) = get_probe(ip);
+    if let Err(err) = tx.send(probe).await {
+        error!("couldn't send request probe to rate limiter: {err}");
+        return Some(new_internal_error_response_500());
+    }
+
+    let resp = rx.await;
+    if let Err(err) = resp {
+        error!("error on receiving rate limiter result: {err}");
+        return Some(new_internal_error_response_500());
+    }
+
+    let result = resp.expect("error on receiving rate limiter result");
+    if let Err(_) = result {
+        error!("rate limiter capacity reached for current timeframe");
+        return Some(new_service_unavailable_error_503());
+    }
+
+    let can_resume = result.expect("rate limiter capacity reached for current timeframe");
+    if !can_resume {
+        return Some(new_too_many_requests_response_429());
+    }
+    None
+}
 
 pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLimit) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -21,7 +55,7 @@ pub fn get_rate_limit_handle(mut rx: mpsc::Receiver<Probe>, limiter_cfg: RateLim
     })
 }
 
-pub fn get_probe(ip: IpAddr) -> (Probe, oneshot::Receiver<Response>) {
+fn get_probe(ip: IpAddr) -> (Probe, oneshot::Receiver<Response>) {
     let (tx, rx) = oneshot::channel();
     (Probe { ip, resp: tx }, rx)
 }

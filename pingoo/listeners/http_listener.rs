@@ -17,14 +17,13 @@ use crate::{
     config::ListenerConfig,
     geoip::{self, GeoipDB, GeoipRecord},
     listeners::{GRACEFUL_SHUTDOWN_TIMEOUT, Listener, accept_tcp_connection, bind_tcp_socket},
-    rate_limiter::get_probe,
+    rate_limiter::limit_http_request,
     rules,
     services::{
         HttpService,
         http_utils::{
             HOSTNAME_MAX_LENGTH, RequestContext, RequestExtensionContext, USER_AGENT_MAX_LENGTH, get_path,
-            new_blocked_response, new_internal_error_response_500, new_not_found_error,
-            new_service_unavailable_error_503, new_too_many_requests_response_429,
+            new_blocked_response, new_not_found_error,
         },
     },
 };
@@ -119,7 +118,7 @@ impl Listener for HttpListener {
     }
 }
 
-pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>(
+pub async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static>(
     tcp_stream: IO,
     services: Arc<Vec<Arc<dyn HttpService>>>,
     client_socket_addr: SocketAddr,
@@ -263,28 +262,8 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
                             Action::Limit {} => {
                                 // todo: if "action: limit" then this must be defined - not Option
                                 if let Some(tx) = rule.limiter_tx.clone() {
-                                    let (probe, rx) = get_probe(client_data.ip);
-                                    if let Err(err) = tx.send(probe).await {
-                                        error!("couldn't send request probe to rate limiter: {err}");
-                                        return Ok(new_internal_error_response_500());
-                                    }
-
-                                    let resp = rx.await;
-                                    if let Err(err) = resp {
-                                        error!("error on receiving rate limiter result: {err}");
-                                        return Ok(new_internal_error_response_500());
-                                    }
-
-                                    let result = resp.expect("error on receiving rate limiter result");
-                                    if let Err(_) = result {
-                                        error!("rate limiter capacity reached for current timeframe");
-                                        return Ok(new_service_unavailable_error_503());
-                                    }
-
-                                    let can_resume =
-                                        result.expect("rate limiter capacity reached for current timeframe");
-                                    if !can_resume {
-                                        return Ok(new_too_many_requests_response_429());
+                                    if let Some(res) = limit_http_request(client_data.ip, tx).await {
+                                        return Ok(res);
                                     }
                                 }
                             }
