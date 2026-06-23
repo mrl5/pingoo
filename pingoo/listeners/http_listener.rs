@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    str::FromStr,
+    sync::Arc,
+};
 
 use ::rules::Action;
 use cookie::Cookie;
@@ -258,6 +262,29 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
                                     return Ok(captcha_manager.serve_captcha());
                                 }
                             }
+                            Action::Allow {} => {
+                                if let Some(cidr) = &rule.cidr {
+                                    let c: Vec<&str> = cidr.split("/").collect();
+                                    if c.len() != 2 {
+                                        return Ok(new_blocked_response());
+                                    }
+                                    let network = c[0];
+                                    let prefix = c[1];
+
+                                    match client_data.ip {
+                                        IpAddr::V4(ip) => {
+                                            if !is_cidr_v4_match(ip, network, prefix) {
+                                                return Ok(new_blocked_response());
+                                            }
+                                        }
+                                        IpAddr::V6(ip) => {
+                                            if !is_cidr_v6_match(ip, network, prefix) {
+                                                return Ok(new_blocked_response());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -293,4 +320,24 @@ pub fn get_host(req: &Request<hyper::body::Incoming>) -> heapless::String<HOSTNA
     }
 
     return heapless::String::new();
+}
+
+fn is_cidr_v4_match(client_ip: Ipv4Addr, network: &str, prefix: &str) -> bool {
+    if let Ok(network) = Ipv4Addr::from_str(network) {
+        if let Ok(prefix) = prefix.parse::<u32>() {
+            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            return (client_ip.to_bits() & mask) == (network.to_bits() & mask);
+        }
+    }
+    false
+}
+
+fn is_cidr_v6_match(client_ip: Ipv6Addr, network: &str, prefix: &str) -> bool {
+    if let Ok(network) = Ipv6Addr::from_str(network) {
+        if let Ok(prefix) = prefix.parse::<u128>() {
+            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            return (client_ip.to_bits() & mask) == (network.to_bits() & mask);
+        }
+    }
+    false
 }

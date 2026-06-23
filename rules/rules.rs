@@ -32,6 +32,7 @@ pub type Context<'a> = bel::Context<'a>;
 pub enum Action {
     Block {},
     Captcha {},
+    Allow {},
 }
 
 #[derive(Debug, thiserror::Error)]

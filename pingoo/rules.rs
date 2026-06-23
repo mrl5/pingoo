@@ -11,6 +11,7 @@ pub struct Rule {
     pub name: String,
     pub expression: Option<rules::CompiledExpression>,
     pub actions: Vec<rules::Action>,
+    pub cidr: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
