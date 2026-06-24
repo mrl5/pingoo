@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::{IpAddr, SocketAddr},
     str::FromStr,
     sync::Arc,
 };
@@ -256,6 +256,7 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
                 if rule.match_request(&rules_ctx) {
                     for action in &rule.actions {
                         match action {
+                            // todo: cidr support in other actions
                             Action::Block {} => return Ok(new_blocked_response()),
                             Action::Captcha {} => {
                                 if !captcha_verified {
@@ -263,27 +264,29 @@ pub(super) async fn serve_http_requests<IO: hyper::rt::Read + hyper::rt::Write +
                                 }
                             }
                             Action::Allow {} => {
-                                if let Some(cidr) = &rule.cidr {
-                                    let c: Vec<&str> = cidr.split("/").collect();
-                                    if c.len() != 2 {
-                                        return Ok(new_blocked_response());
-                                    }
-                                    let network = c[0];
-                                    let prefix = c[1];
-
+                                if let Some(cidr) = &rule.cidr_v4 {
                                     match client_data.ip {
                                         IpAddr::V4(ip) => {
-                                            if !is_cidr_v4_match(ip, network, prefix) {
+                                            if !cidr.contains(ip) {
                                                 return Ok(new_blocked_response());
                                             }
                                         }
-                                        IpAddr::V6(ip) => {
-                                            if !is_cidr_v6_match(ip, network, prefix) {
-                                                return Ok(new_blocked_response());
-                                            }
-                                        }
+                                        IpAddr::V6(_) => {}
                                     }
                                 }
+
+                                if let Some(cidr) = &rule.cidr_v6 {
+                                    match client_data.ip {
+                                        IpAddr::V6(ip) => {
+                                            if !cidr.contains(ip) {
+                                                return Ok(new_blocked_response());
+                                            }
+                                        }
+                                        IpAddr::V4(_) => {}
+                                    }
+                                }
+
+                                // otherwise just pass through
                             }
                         }
                     }
@@ -320,24 +323,4 @@ pub fn get_host(req: &Request<hyper::body::Incoming>) -> heapless::String<HOSTNA
     }
 
     return heapless::String::new();
-}
-
-fn is_cidr_v4_match(client_ip: Ipv4Addr, network: &str, prefix: &str) -> bool {
-    if let Ok(network) = Ipv4Addr::from_str(network) {
-        if let Ok(prefix) = prefix.parse::<u32>() {
-            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-            return (client_ip.to_bits() & mask) == (network.to_bits() & mask);
-        }
-    }
-    false
-}
-
-fn is_cidr_v6_match(client_ip: Ipv6Addr, network: &str, prefix: &str) -> bool {
-    if let Ok(network) = Ipv6Addr::from_str(network) {
-        if let Ok(prefix) = prefix.parse::<u128>() {
-            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
-            return (client_ip.to_bits() & mask) == (network.to_bits() & mask);
-        }
-    }
-    false
 }
