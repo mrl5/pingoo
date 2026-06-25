@@ -258,8 +258,7 @@ pub async fn load_and_validate() -> Result<Config, Error> {
         .map(|(rule_name, rule_config)| {
             let mut cidr_v4: Option<CidrV4> = None;
             if let Some(c4) = rule_config.cidr_v4 {
-                let c4 = load_cidr_v4(c4)?;
-                cidr_v4 = Some(c4);
+                cidr_v4 = Some(load_cidr_v4(c4)?);
             }
             let mut cidr_v6: Option<CidrV6> = None;
             if let Some(c6) = rule_config.cidr_v6 {
